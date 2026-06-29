@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
   const prefix = userPrefix(session.user.id);
   const filePath = path || name;
 
-  const blob = await put(`${prefix}${filePath}`, content, {
+  const blob = await put(`${prefix}${filePath}`, content || " ", {
     access: "public",
     contentType: "text/markdown",
     addRandomSuffix: false,

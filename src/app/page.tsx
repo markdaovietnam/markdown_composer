@@ -42,32 +42,39 @@ function getEntriesForFolder(files: FileItem[], currentPath: string): Entry[] {
   const seenFolders = new Set<string>();
   const prefix = currentPath ? currentPath + "/" : "";
 
+  // First pass: detect folders from all files (including .folder markers)
   for (const file of files) {
-    if (file.path.endsWith("/.folder")) continue;
-    if (!file.path.startsWith(prefix) && currentPath !== "") continue;
-    if (currentPath === "" && !file.path.includes("/")) {
-      entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content), url: file.url });
-      continue;
-    }
-    if (currentPath === "") {
-      const folderName = file.path.split("/")[0];
+    const path = file.path;
+    if (!currentPath && path.includes("/")) {
+      const folderName = path.split("/")[0];
       if (!seenFolders.has(folderName)) {
         seenFolders.add(folderName);
         const count = files.filter((f) => f.path.startsWith(folderName + "/") && !f.path.endsWith("/.folder")).length;
         entries.push({ type: "folder", name: folderName, path: folderName, itemCount: count });
       }
-      continue;
+    } else if (currentPath && path.startsWith(prefix)) {
+      const rest = path.slice(prefix.length);
+      if (rest.includes("/")) {
+        const folderName = rest.split("/")[0];
+        if (!seenFolders.has(folderName)) {
+          seenFolders.add(folderName);
+          const folderPath = prefix + folderName;
+          const count = files.filter((f) => f.path.startsWith(folderPath + "/") && !f.path.endsWith("/.folder")).length;
+          entries.push({ type: "folder", name: folderName, path: folderPath, itemCount: count });
+        }
+      }
     }
-    const rest = file.path.slice(prefix.length);
-    if (!rest.includes("/")) {
+  }
+
+  // Second pass: add files (not .folder markers)
+  for (const file of files) {
+    if (file.path.endsWith("/.folder")) continue;
+    if (!currentPath && !file.path.includes("/")) {
       entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content), url: file.url });
-    } else {
-      const folderName = rest.split("/")[0];
-      if (!seenFolders.has(folderName)) {
-        seenFolders.add(folderName);
-        const folderPath = prefix + folderName;
-        const count = files.filter((f) => f.path.startsWith(folderPath + "/") && !f.path.endsWith("/.folder")).length;
-        entries.push({ type: "folder", name: folderName, path: folderPath, itemCount: count });
+    } else if (currentPath && file.path.startsWith(prefix)) {
+      const rest = file.path.slice(prefix.length);
+      if (!rest.includes("/")) {
+        entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content), url: file.url });
       }
     }
   }

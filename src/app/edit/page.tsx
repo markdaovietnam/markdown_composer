@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import ThemeToggle from "@/components/ThemeToggle";
 
 const RichTextEditor = lazy(() => import("@/components/RichTextEditor"));
+const RewriteDialog = lazy(() => import("@/components/RewriteDialog"));
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -21,6 +22,7 @@ interface Version {
   timestamp: number;
   url: string;
   size: number;
+  name?: string;
 }
 
 function findSourceLine(content: string, tag: string, index: number): number {
@@ -99,6 +101,13 @@ function Editor() {
   const [loadingVersions, setLoadingVersions] = useState(false);
   const [previewVersion, setPreviewVersion] = useState<{ timestamp: number; content: string } | null>(null);
   const [restoringVersion, setRestoringVersion] = useState(false);
+  const [rewriteState, setRewriteState] = useState<{
+    text: string;
+    position: { x: number; y: number };
+    selStart?: number;
+    selEnd?: number;
+  } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (status === "unauthenticated") router.push("/login");
@@ -162,13 +171,15 @@ function Editor() {
 
   const createVersion = useCallback(async () => {
     if (!file) return;
+    const name = window.prompt("Version name (optional):", "") ?? "";
+    if (name === null) return;
     setSavingVersion(true);
     try {
       const filePath = file.path || file.name;
       await fetch("/api/versions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ filePath, content: file.content }),
+        body: JSON.stringify({ filePath, content: file.content, name: name.trim() }),
       });
       if (showVersions) fetchVersions();
     } catch (err) {
@@ -177,6 +188,23 @@ function Editor() {
       setSavingVersion(false);
     }
   }, [file, showVersions, fetchVersions]);
+
+  const renameVersion = useCallback(async (v: Version) => {
+    if (!file) return;
+    const name = window.prompt("Rename version:", v.name || "");
+    if (name === null) return;
+    try {
+      const filePath = file.path || file.name;
+      await fetch("/api/versions", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filePath, timestamp: v.timestamp, name: name.trim() }),
+      });
+      fetchVersions();
+    } catch (err) {
+      console.error(err);
+    }
+  }, [file, fetchVersions]);
 
   const toggleVersions = useCallback(() => {
     const next = !showVersions;
@@ -305,6 +333,15 @@ function Editor() {
                   onChange={(e) => updateContent(e.target.value)}
                   placeholder="Write your markdown here..."
                   spellCheck={false}
+                  onContextMenu={(e) => {
+                    const ta = editorRef.current;
+                    if (!ta) return;
+                    const sel = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+                    if (sel.trim()) {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY });
+                    }
+                  }}
                 />
               </div>
               <div className="preview-pane">
@@ -319,7 +356,13 @@ function Editor() {
           ) : (
             <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
               <Suspense fallback={<div style={{ padding: 20 }}>Loading editor...</div>}>
-                <RichTextEditor content={file.content} onChange={updateContent} />
+                <RichTextEditor content={file.content} onChange={updateContent} onContextMenu={(e) => {
+                  const sel = window.getSelection()?.toString() || "";
+                  if (sel.trim()) {
+                    e.preventDefault();
+                    setCtxMenu({ x: e.clientX, y: e.clientY });
+                  }
+                }} />
               </Suspense>
             </div>
           )}
@@ -334,7 +377,7 @@ function Editor() {
             {loadingVersions ? (
               <div className="vh-loading">Loading versions...</div>
             ) : versions.length === 0 ? (
-              <div className="vh-empty">No versions yet. Versions are saved automatically when you edit.</div>
+              <div className="vh-empty">No versions yet. Click &quot;Save Version&quot; to create a snapshot.</div>
             ) : (
               <div className="vh-list">
                 {versions.map((v) => {
@@ -343,14 +386,23 @@ function Editor() {
                   return (
                     <div key={v.timestamp} className={`vh-item${isActive ? " vh-item-active" : ""}`}>
                       <button className="vh-item-btn" onClick={() => previewVersionContent(v)}>
-                        <span className="vh-item-date">{date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" })}</span>
-                        <span className="vh-item-time">{date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+                        <div className="vh-item-info">
+                          {v.name && <span className="vh-item-name">{v.name}</span>}
+                          <span className="vh-item-date">
+                            {date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric" })}
+                            {" "}
+                            {date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
+                          </span>
+                        </div>
                         <span className="vh-item-size">{(v.size / 1024).toFixed(1)} KB</span>
                       </button>
                       {isActive && (
                         <div className="vh-item-actions">
                           <button className="btn" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => restoreVersion(v)} disabled={restoringVersion}>
-                            {restoringVersion ? "Restoring..." : "Restore this version"}
+                            {restoringVersion ? "Restoring..." : "Restore"}
+                          </button>
+                          <button className="btn-ghost btn" style={{ fontSize: 11, padding: "4px 10px" }} onClick={() => renameVersion(v)}>
+                            Rename
                           </button>
                         </div>
                       )}
@@ -368,6 +420,63 @@ function Editor() {
           </div>
         )}
       </div>
+
+      {/* Context menu for rewrite */}
+      {ctxMenu && (
+        <div
+          className="db-ctx-menu"
+          style={{ top: ctxMenu.y, left: ctxMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button className="db-ctx-btn" onClick={() => {
+            const ta = editorRef.current;
+            if (ta) {
+              const sel = ta.value.substring(ta.selectionStart, ta.selectionEnd);
+              if (sel.trim()) {
+                setRewriteState({
+                  text: sel,
+                  position: { x: ctxMenu.x, y: ctxMenu.y },
+                  selStart: ta.selectionStart,
+                  selEnd: ta.selectionEnd,
+                });
+              }
+            } else {
+              const sel = window.getSelection()?.toString() || "";
+              if (sel.trim()) {
+                setRewriteState({
+                  text: sel,
+                  position: { x: ctxMenu.x, y: ctxMenu.y },
+                });
+              }
+            }
+            setCtxMenu(null);
+          }}>
+            ✨ Rewrite with AI
+          </button>
+        </div>
+      )}
+
+      {/* Rewrite dialog */}
+      {rewriteState && (
+        <Suspense fallback={null}>
+          <RewriteDialog
+            selectedText={rewriteState.text}
+            position={rewriteState.position}
+            onClose={() => setRewriteState(null)}
+            onRewrite={(newText) => {
+              if (!file) return;
+              if (mode === "markdown" && rewriteState.selStart !== undefined && rewriteState.selEnd !== undefined) {
+                const before = file.content.substring(0, rewriteState.selStart);
+                const after = file.content.substring(rewriteState.selEnd);
+                updateContent(before + newText + after);
+              } else {
+                const updated = file.content.replace(rewriteState.text, newText);
+                updateContent(updated);
+              }
+            }}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

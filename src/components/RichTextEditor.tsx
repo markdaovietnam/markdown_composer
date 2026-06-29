@@ -43,9 +43,10 @@ async function markdownToHtml(md: string): Promise<string> {
 interface Props {
   content: string;
   onChange: (markdown: string) => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }
 
-export default function RichTextEditor({ content, onChange }: Props) {
+export default function RichTextEditor({ content, onChange, onContextMenu }: Props) {
   const suppressUpdate = useRef(false);
   const lastMarkdown = useRef("");
 
@@ -90,7 +91,7 @@ export default function RichTextEditor({ content, onChange }: Props) {
   if (!editor) return null;
 
   return (
-    <div className="rte-container">
+    <div className="rte-container" onContextMenu={onContextMenu}>
       {/* Toolbar */}
       <div className="rte-toolbar">
         <div className="rte-toolbar-group">
