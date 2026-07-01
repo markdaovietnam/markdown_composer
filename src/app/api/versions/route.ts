@@ -1,154 +1,105 @@
-import { list, put, del } from "@vercel/blob";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { canAccessFile } from "@/lib/access";
 
-function versionPrefix(userId: string, filePath: string) {
-  return `users/${userId}/versions/${filePath}/`;
-}
+const MAX_VERSIONS = 50;
 
-function metaPath(userId: string, filePath: string) {
-  return `users/${userId}/versions/${filePath}/_meta.json`;
-}
-
-async function loadMeta(userId: string, filePath: string): Promise<Record<string, string>> {
-  const path = metaPath(userId, filePath);
-  const { blobs } = await list({ prefix: path });
-  if (blobs.length === 0) return {};
-  try {
-    const res = await fetch(blobs[0].url);
-    return await res.json();
-  } catch {
-    return {};
-  }
-}
-
-async function saveMeta(userId: string, filePath: string, meta: Record<string, string>) {
-  const path = metaPath(userId, filePath);
-  await put(path, JSON.stringify(meta), {
-    access: "public",
-    contentType: "application/json",
-    addRandomSuffix: false,
-  });
+async function getFile(ownerId: string, filePath: string) {
+  return prisma.file.findUnique({ where: { ownerId_path: { ownerId, path: filePath } } });
 }
 
 export async function GET(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const filePath = req.nextUrl.searchParams.get("file");
-  if (!filePath) {
-    return NextResponse.json({ error: "Missing file param" }, { status: 400 });
-  }
+  const ownerId = req.nextUrl.searchParams.get("owner") || session.user.id;
+  if (!filePath) return NextResponse.json({ error: "Missing file param" }, { status: 400 });
 
-  const prefix = versionPrefix(session.user.id, filePath);
-  const { blobs } = await list({ prefix });
-  const meta = await loadMeta(session.user.id, filePath);
+  const allowed = await canAccessFile(session.user.id, ownerId, filePath);
+  if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const versions = blobs
-    .filter((blob) => !blob.pathname.endsWith("_meta.json"))
-    .map((blob) => {
-      const ts = blob.pathname.replace(prefix, "").replace(".md", "");
-      const timestamp = parseInt(ts, 10);
-      return {
-        timestamp,
-        url: blob.url,
-        size: blob.size,
-        name: meta[String(timestamp)] || "",
-      };
-    })
-    .filter((v) => !isNaN(v.timestamp))
-    .sort((a, b) => b.timestamp - a.timestamp);
+  const file = await getFile(ownerId, filePath);
+  if (!file) return NextResponse.json([]);
 
-  return NextResponse.json(versions);
+  const versions = await prisma.version.findMany({
+    where: { fileId: file.id },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return NextResponse.json(
+    versions.map((v) => ({
+      timestamp: v.createdAt.getTime(),
+      id: v.id,
+      name: v.name,
+      size: v.content.length,
+      content: v.content,
+    }))
+  );
 }
 
 export async function POST(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { filePath, content, name, owner } = await req.json();
+  const ownerId = owner || session.user.id;
+  if (!filePath || content == null) return NextResponse.json({ error: "Missing filePath or content" }, { status: 400 });
+
+  const allowed = await canAccessFile(session.user.id, ownerId, filePath);
+  if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  let file = await getFile(ownerId, filePath);
+  if (!file) {
+    file = await prisma.file.create({
+      data: { name: filePath.split("/").pop() || filePath, path: filePath, content, ownerId },
+    });
   }
 
-  const { filePath, content, name } = await req.json();
-  if (!filePath || content == null) {
-    return NextResponse.json({ error: "Missing filePath or content" }, { status: 400 });
-  }
+  // Skip if content unchanged
+  const latest = await prisma.version.findFirst({
+    where: { fileId: file.id },
+    orderBy: { createdAt: "desc" },
+  });
+  if (latest?.content === content) return NextResponse.json({ skipped: true });
 
-  const prefix = versionPrefix(session.user.id, filePath);
-  const { blobs } = await list({ prefix });
-  const contentBlobs = blobs.filter((b) => !b.pathname.endsWith("_meta.json"));
-
-  if (contentBlobs.length > 0) {
-    const latest = contentBlobs.sort((a, b) => {
-      const tsA = parseInt(a.pathname.replace(prefix, "").replace(".md", ""), 10);
-      const tsB = parseInt(b.pathname.replace(prefix, "").replace(".md", ""), 10);
-      return tsB - tsA;
-    })[0];
-    const res = await fetch(latest.url);
-    const lastContent = await res.text();
-    if (lastContent === content) {
-      return NextResponse.json({ skipped: true });
-    }
-  }
-
-  const ts = Date.now();
-  const blob = await put(`${prefix}${ts}.md`, content, {
-    access: "public",
-    contentType: "text/markdown",
-    addRandomSuffix: false,
+  const version = await prisma.version.create({
+    data: { fileId: file.id, content, name: name || "" },
   });
 
-  if (name) {
-    const meta = await loadMeta(session.user.id, filePath);
-    meta[String(ts)] = name;
-    await saveMeta(session.user.id, filePath, meta);
-  }
-
-  const MAX_VERSIONS = 50;
-  if (contentBlobs.length >= MAX_VERSIONS) {
-    const sorted = contentBlobs.sort((a, b) => {
-      const tsA = parseInt(a.pathname.replace(prefix, "").replace(".md", ""), 10);
-      const tsB = parseInt(b.pathname.replace(prefix, "").replace(".md", ""), 10);
-      return tsA - tsB;
+  // Prune old versions
+  const count = await prisma.version.count({ where: { fileId: file.id } });
+  if (count > MAX_VERSIONS) {
+    const oldest = await prisma.version.findMany({
+      where: { fileId: file.id },
+      orderBy: { createdAt: "asc" },
+      take: count - MAX_VERSIONS,
     });
-    const toDelete = sorted.slice(0, contentBlobs.length - MAX_VERSIONS + 1);
-    await Promise.all(toDelete.map((b) => del(b.url)));
+    await prisma.version.deleteMany({ where: { id: { in: oldest.map((v) => v.id) } } });
   }
 
-  return NextResponse.json({ timestamp: ts, url: blob.url, name: name || "" });
+  return NextResponse.json({ timestamp: version.createdAt.getTime(), id: version.id, name: version.name });
 }
 
 export async function PATCH(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { filePath, timestamp, name } = await req.json();
-  if (!filePath || !timestamp) {
-    return NextResponse.json({ error: "Missing filePath or timestamp" }, { status: 400 });
-  }
+  const { id, name } = await req.json();
+  if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 
-  const meta = await loadMeta(session.user.id, filePath);
-  if (name) {
-    meta[String(timestamp)] = name;
-  } else {
-    delete meta[String(timestamp)];
-  }
-  await saveMeta(session.user.id, filePath, meta);
+  await prisma.version.update({ where: { id }, data: { name: name || "" } });
 
   return NextResponse.json({ ok: true });
 }
 
 export async function DELETE(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { url } = await req.json();
-  if (url) await del(url);
+  const { id } = await req.json();
+  if (id) await prisma.version.delete({ where: { id } });
 
   return NextResponse.json({ ok: true });
 }

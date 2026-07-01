@@ -1,7 +1,7 @@
 import NextAuth from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { compare } from "bcryptjs";
-import { list } from "@vercel/blob";
+import { prisma } from "@/lib/prisma";
 
 export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: [
@@ -15,17 +15,14 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         const password = credentials?.password as string;
         if (!email || !password) return null;
 
-        const userId = email.toLowerCase().replace(/[^a-z0-9]/g, "_");
         try {
-          const { blobs } = await list({ prefix: `users/${userId}/profile.json` });
-          if (blobs.length === 0) return null;
+          const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+          if (!user) return null;
 
-          const res = await fetch(blobs[0].url);
-          const user = await res.json();
-          const valid = await compare(password, user.passwordHash);
+          const valid = await compare(password, user.password);
           if (!valid) return null;
 
-          return { id: userId, email: user.email, name: user.name || email };
+          return { id: user.id, email: user.email };
         } catch {
           return null;
         }
@@ -34,19 +31,13 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   ],
   callbacks: {
     jwt({ token, user }) {
-      if (user) {
-        token.userId = user.id;
-      }
+      if (user) token.userId = user.id;
       return token;
     },
     session({ session, token }) {
-      if (session.user) {
-        session.user.id = token.userId as string;
-      }
+      if (session.user) session.user.id = token.userId as string;
       return session;
     },
   },
-  pages: {
-    signIn: "/login",
-  },
+  pages: { signIn: "/login" },
 });

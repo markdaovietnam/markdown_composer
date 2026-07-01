@@ -10,7 +10,6 @@ interface FileItem {
   name: string;
   path: string;
   content: string;
-  url: string;
 }
 
 interface FolderEntry {
@@ -25,7 +24,6 @@ interface FileEntry {
   name: string;
   path: string;
   size: string;
-  url: string;
 }
 
 type Entry = FolderEntry | FileEntry;
@@ -70,11 +68,11 @@ function getEntriesForFolder(files: FileItem[], currentPath: string): Entry[] {
   for (const file of files) {
     if (file.path.endsWith("/.folder")) continue;
     if (!currentPath && !file.path.includes("/")) {
-      entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content), url: file.url });
+      entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content) });
     } else if (currentPath && file.path.startsWith(prefix)) {
       const rest = file.path.slice(prefix.length);
       if (!rest.includes("/")) {
-        entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content), url: file.url });
+        entries.push({ type: "file", name: file.name, path: file.path, size: formatSize(file.content) });
       }
     }
   }
@@ -93,6 +91,8 @@ export default function Home() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentPath, setCurrentPath] = useState("");
+  const [view, setView] = useState<"files" | "shared">("files");
+  const [sharedFiles, setSharedFiles] = useState<{ fromEmail: string; fileName: string; filePath: string; fromUserId: string; sharedAt: number }[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: Entry } | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -101,6 +101,10 @@ export default function Home() {
   const [newFolderName, setNewFolderName] = useState("");
   const [dragging, setDragging] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
+  const [shareModal, setShareModal] = useState<{ path: string; name: string } | null>(null);
+  const [shareEmail, setShareEmail] = useState("");
+  const [shareStatus, setShareStatus] = useState<{ type: "ok" | "error"; msg: string } | null>(null);
+  const [sharing, setSharing] = useState(false);
   const renameRef = useRef<HTMLInputElement>(null);
   const folderRef = useRef<HTMLInputElement>(null);
 
@@ -120,9 +124,18 @@ export default function Home() {
     }
   }, []);
 
+  const fetchSharedFiles = useCallback(async () => {
+    try {
+      const res = await fetch("/api/share");
+      if (res.ok) setSharedFiles(await res.json());
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
   useEffect(() => {
-    if (status === "authenticated") fetchFiles();
-  }, [status, fetchFiles]);
+    if (status === "authenticated") { fetchFiles(); fetchSharedFiles(); }
+  }, [status, fetchFiles, fetchSharedFiles]);
 
   useEffect(() => {
     if (renaming && renameRef.current) { renameRef.current.focus(); renameRef.current.select(); }
@@ -161,12 +174,12 @@ export default function Home() {
       await fetch("/api/files", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: entry.url }),
+        body: JSON.stringify({ path: entry.path }),
       });
     } else {
       const toDelete = files.filter((f) => f.path.startsWith(entry.path + "/"));
       await Promise.all(toDelete.map((f) =>
-        fetch("/api/files", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: f.url }) })
+        fetch("/api/files", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: f.path }) })
       ));
     }
     fetchFiles();
@@ -194,7 +207,7 @@ export default function Home() {
     await fetch("/api/files", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ oldPath: renaming, newPath, url: file.url }),
+      body: JSON.stringify({ oldPath: renaming, newPath }),
     });
     setRenaming(null);
     fetchFiles();
@@ -244,6 +257,45 @@ export default function Home() {
     fetchFiles();
   }, [currentPath, fetchFiles]);
 
+  const downloadFile = (entry: FileEntry) => {
+    const file = files.find((f) => f.path === entry.path);
+    if (!file) return;
+    const blob = new Blob([file.content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = entry.name;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const shareFile = async () => {
+    if (!shareModal || !shareEmail.trim()) return;
+    setSharing(true);
+    setShareStatus(null);
+    try {
+      const res = await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: shareEmail.trim(),
+          filePath: shareModal.path,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setShareStatus({ type: "error", msg: data.error });
+      } else {
+        setShareStatus({ type: "ok", msg: `Shared with ${shareEmail.trim()}` });
+        setShareEmail("");
+      }
+    } catch {
+      setShareStatus({ type: "error", msg: "Failed to share" });
+    } finally {
+      setSharing(false);
+    }
+  };
+
   if (status === "loading" || status === "unauthenticated" || loading) {
     return <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center" }}>Loading...</div>;
   }
@@ -268,9 +320,14 @@ export default function Home() {
           <span>Markdown Composer</span>
         </div>
         <nav className="db-nav">
-          <a className="db-nav-item active" onClick={() => setCurrentPath("")}>
+          <a className={`db-nav-item ${view === "files" ? "active" : ""}`} onClick={() => { setView("files"); setCurrentPath(""); }}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /></svg>
             All files
+          </a>
+          <a className={`db-nav-item ${view === "shared" ? "active" : ""}`} onClick={() => { setView("shared"); fetchSharedFiles(); }}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87" /><path d="M16 3.13a4 4 0 010 7.75" /></svg>
+            Shared with me
+            {sharedFiles.length > 0 && <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--accent)" }}>{sharedFiles.length}</span>}
           </a>
         </nav>
         <div className="db-sidebar-footer">
@@ -285,6 +342,7 @@ export default function Home() {
 
       {/* Main */}
       <div className="db-main">
+        {view === "files" ? (<>
         {/* Toolbar */}
         <div className="db-toolbar">
           <div className="db-toolbar-left">
@@ -441,6 +499,66 @@ export default function Home() {
             </tbody>
           </table>
         </div>
+        </>) : (
+          /* Shared with me view */
+          <div className="db-table-wrap" style={{ paddingTop: 16 }}>
+            <div className="db-breadcrumb" style={{ padding: "0 0 12px" }}>
+              <span className="db-breadcrumb-btn active">Shared with me</span>
+            </div>
+            {sharedFiles.length === 0 ? (
+              <div style={{ textAlign: "center", padding: 60, color: "var(--foreground-muted)" }}>
+                No files shared with you yet.
+              </div>
+            ) : (
+              <table className="db-table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 40 }}></th>
+                    <th>Name</th>
+                    <th>Shared by</th>
+                    <th style={{ width: 120 }}>Date</th>
+                    <th style={{ width: 100 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sharedFiles.map((sf) => (
+                    <tr key={sf.filePath + sf.fromUserId} className="db-row">
+                      <td>
+                        <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="var(--text-muted)" strokeWidth="1.2">
+                          <path d="M3 2h7l3 3v9a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" />
+                          <path d="M10 2v3h3" />
+                        </svg>
+                      </td>
+                      <td><span className="db-filename">{sf.fileName}</span></td>
+                      <td className="db-cell-meta">{sf.fromEmail}</td>
+                      <td className="db-cell-meta">{new Date(sf.sharedAt).toLocaleDateString("vi-VN")}</td>
+                      <td style={{ display: "flex", gap: 6 }}>
+                        <button className="btn" style={{ fontSize: 11, padding: "3px 8px" }} onClick={() => {
+                          router.push(`/edit?file=${encodeURIComponent(sf.filePath)}&owner=${encodeURIComponent(sf.fromUserId)}`);
+                        }}>
+                          Open
+                        </button>
+                        <button className="btn-ghost btn" style={{ fontSize: 11, padding: "3px 8px" }} onClick={async () => {
+                          try {
+                            const res = await fetch(`/api/collab?path=${encodeURIComponent(sf.filePath)}&owner=${encodeURIComponent(sf.fromUserId)}`);
+                            const data = await res.json();
+                            const blob = new Blob([data.content || ""], { type: "text/markdown" });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url; a.download = sf.fileName; a.click();
+                            URL.revokeObjectURL(url);
+                          } catch { /* ignore */ }
+                        }}>
+                          Download
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Context menu */}
@@ -461,10 +579,70 @@ export default function Home() {
               Rename
             </button>
           )}
+          {contextMenu.entry.type === "file" && (
+            <>
+              <button className="db-ctx-btn" onClick={() => { downloadFile(contextMenu.entry as FileEntry); setContextMenu(null); }}>
+                Download .md
+              </button>
+              <button className="db-ctx-btn" onClick={() => {
+                const e = contextMenu.entry as FileEntry;
+                setShareModal({ path: e.path, name: e.name });
+                setContextMenu(null);
+              }}>
+                Share
+              </button>
+            </>
+          )}
           <div className="db-ctx-sep" />
           <button className="db-ctx-btn db-ctx-danger" onClick={() => { deleteEntry(contextMenu.entry); setContextMenu(null); }}>
             Delete
           </button>
+        </div>
+      )}
+
+      {/* Share modal */}
+      {shareModal && (
+        <div className="rw-overlay" onClick={() => { setShareModal(null); setShareStatus(null); setShareEmail(""); }}>
+          <div className="rw-dialog" style={{ top: "50%", left: "50%", transform: "translate(-50%, -50%)" }} onClick={(e) => e.stopPropagation()}>
+            <div className="rw-header">
+              <span className="rw-title">Share &quot;{shareModal.name}&quot;</span>
+              <button className="rw-close" onClick={() => { setShareModal(null); setShareStatus(null); setShareEmail(""); }}>✕</button>
+            </div>
+            <div style={{ padding: 16 }}>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 500, marginBottom: 6, color: "var(--foreground-muted)" }}>
+                Share with (email)
+              </label>
+              <input
+                type="email"
+                value={shareEmail}
+                onChange={(e) => setShareEmail(e.target.value)}
+                placeholder="user@example.com"
+                style={{
+                  width: "100%", padding: "8px 12px", borderRadius: 6,
+                  border: "1px solid var(--border)", background: "var(--surface-200)",
+                  color: "var(--foreground)", fontSize: 13, outline: "none",
+                  boxSizing: "border-box",
+                }}
+                onKeyDown={(e) => { if (e.key === "Enter") shareFile(); }}
+                autoFocus
+              />
+              {shareStatus && (
+                <div style={{
+                  marginTop: 8, fontSize: 12, padding: "6px 10px", borderRadius: 6,
+                  background: shareStatus.type === "ok" ? "var(--accent-light)" : "var(--danger-light)",
+                  color: shareStatus.type === "ok" ? "var(--accent-text)" : "var(--danger)",
+                }}>
+                  {shareStatus.msg}
+                </div>
+              )}
+            </div>
+            <div className="rw-actions">
+              <button className="btn-ghost btn" onClick={() => { setShareModal(null); setShareStatus(null); setShareEmail(""); }} style={{ fontSize: 12 }}>Cancel</button>
+              <button className="btn" onClick={shareFile} disabled={sharing || !shareEmail.trim()} style={{ fontSize: 12 }}>
+                {sharing ? "Sharing..." : "Share"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

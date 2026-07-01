@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+
+  files     File[]
+  comments  Comment[]
+  sharesGiven    Share[] @relation("ShareGiver")
+  sharesReceived Share[] @relation("ShareReceiver")
+}
+
+model File {
+  id        String   @id @default(cuid())
+  name      String
+  path      String
+  content   String   @default("")
+  isFolder  Boolean  @default(false)
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions  Version[]
+  comments  Comment[]
+  shares    Share[]
+  presences Presence[]
+
+  @@unique([ownerId, path])
+}
+
+model Version {
+  id        String   @id @default(cuid())
+  fileId    String
+  file      File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  content   String
+  name      String   @default("")
+  createdAt DateTime @default(now())
+}
+
+model Comment {
+  id          String   @id @default(cuid())
+  fileId      String
+  file        File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorEmail String
+  text        String
+  resolved    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model Share {
+  id         String   @id @default(cuid())
+  fileId     String
+  file       File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  giverId    String
+  giver      User     @relation("ShareGiver", fields: [giverId], references: [id], onDelete: Cascade)
+  receiverId String
+  receiver   User     @relation("ShareReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([fileId, receiverId])
+}
+
+model Presence {
+  id        String   @id @default(cuid())
+  fileId    String
+  file      File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  userId    String
+  userEmail String
+  lastSeen  DateTime @default(now()) @updatedAt
+
+  @@unique([fileId, userId])
+}

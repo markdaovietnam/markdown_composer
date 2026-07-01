@@ -1,97 +1,74 @@
-import { list, put, del } from "@vercel/blob";
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-
-function userPrefix(userId: string) {
-  return `users/${userId}/files/`;
-}
+import { prisma } from "@/lib/prisma";
 
 export async function GET() {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const prefix = userPrefix(session.user.id);
-  const { blobs } = await list({ prefix });
+  const files = await prisma.file.findMany({ where: { ownerId: session.user.id } });
 
-  const files = await Promise.all(
-    blobs.map(async (blob) => {
-      const res = await fetch(blob.url);
-      const content = await res.text();
-      const path = blob.pathname.replace(prefix, "");
-      return { id: path, name: path.split("/").pop() || path, path, content, url: blob.url };
-    })
+  return NextResponse.json(
+    files.map((f) => ({
+      id: f.id,
+      name: f.name,
+      path: f.path,
+      content: f.content,
+      isFolder: f.isFolder,
+    }))
   );
-
-  return NextResponse.json(files);
 }
 
 export async function POST(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { name, content, path } = await req.json();
-  const prefix = userPrefix(session.user.id);
+  const { name, content, path, isFolder } = await req.json();
   const filePath = path || name;
 
-  const blob = await put(`${prefix}${filePath}`, content || " ", {
-    access: "public",
-    contentType: "text/markdown",
-    addRandomSuffix: false,
+  const file = await prisma.file.upsert({
+    where: { ownerId_path: { ownerId: session.user.id, path: filePath } },
+    update: { content: content ?? "", name: filePath.split("/").pop() || filePath },
+    create: {
+      name: filePath.split("/").pop() || filePath,
+      path: filePath,
+      content: content ?? "",
+      isFolder: isFolder ?? false,
+      ownerId: session.user.id,
+    },
   });
 
-  return NextResponse.json({
-    id: filePath,
-    name: filePath.split("/").pop() || filePath,
-    path: filePath,
-    content,
-    url: blob.url,
-  });
+  return NextResponse.json({ id: file.id, name: file.name, path: file.path, content: file.content });
 }
 
 export async function PATCH(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { oldPath, newPath, url: oldUrl } = await req.json();
-  const prefix = userPrefix(session.user.id);
+  const { oldPath, newPath } = await req.json();
 
-  // Read old content
-  const res = await fetch(oldUrl);
-  const content = await res.text();
+  const file = await prisma.file.findUnique({
+    where: { ownerId_path: { ownerId: session.user.id, path: oldPath } },
+  });
+  if (!file) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Create at new path
-  const blob = await put(`${prefix}${newPath}`, content, {
-    access: "public",
-    contentType: "text/markdown",
-    addRandomSuffix: false,
+  const updated = await prisma.file.update({
+    where: { id: file.id },
+    data: { path: newPath, name: newPath.split("/").pop() || newPath },
   });
 
-  // Delete old
-  await del(oldUrl);
-
-  return NextResponse.json({
-    id: newPath,
-    name: newPath.split("/").pop() || newPath,
-    path: newPath,
-    content,
-    url: blob.url,
-  });
+  return NextResponse.json({ id: updated.id, name: updated.name, path: updated.path });
 }
 
 export async function DELETE(req: NextRequest) {
   const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { url } = await req.json();
-  if (url) await del(url);
+  const { path } = await req.json();
+
+  await prisma.file.deleteMany({
+    where: { ownerId: session.user.id, path },
+  });
 
   return NextResponse.json({ ok: true });
 }

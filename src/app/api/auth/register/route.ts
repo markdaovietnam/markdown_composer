@@ -1,9 +1,9 @@
 import { hash } from "bcryptjs";
-import { put, list } from "@vercel/blob";
 import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 
 export async function POST(req: NextRequest) {
-  const { email, password, name } = await req.json();
+  const { email, password } = await req.json();
 
   if (!email || !password) {
     return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
@@ -13,20 +13,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Password must be at least 6 characters" }, { status: 400 });
   }
 
-  const userId = email.toLowerCase().replace(/[^a-z0-9]/g, "_");
-
-  const { blobs } = await list({ prefix: `users/${userId}/profile.json` });
-  if (blobs.length > 0) {
+  const existing = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  if (existing) {
     return NextResponse.json({ error: "Email already registered" }, { status: 409 });
   }
 
   const passwordHash = await hash(password, 12);
-
-  await put(
-    `users/${userId}/profile.json`,
-    JSON.stringify({ email: email.toLowerCase(), name: name || email, passwordHash }),
-    { access: "public", contentType: "application/json", addRandomSuffix: false }
-  );
+  await prisma.user.create({ data: { email: email.toLowerCase(), password: passwordHash } });
 
   return NextResponse.json({ ok: true });
 }
